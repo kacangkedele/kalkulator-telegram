@@ -1,22 +1,20 @@
 import ast
 import logging
 import math
-import operator
 import os
-from typing import Union
+import re
+from typing import Any
 
+from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
-from telegram.ext import (
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CallbackContext, CallbackQueryHandler, CommandHandler, ContextTypes
 
+load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MAX_EXPRESSION_LENGTH = 100
+APP_NAME = "Kalkulator Telegram Interaktif"
+MAX_EXPRESSION_LENGTH = 80
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -25,65 +23,77 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-Number = Union[int, float]
+def is_valid_expression(text: str) -> bool:
+    if not text or len(text) > MAX_EXPRESSION_LENGTH:
+        return False
+    if re.search(r"[^0-9+\-*/().%\s]", text):
+        return False
+    return True
 
 
-# Hanya operator matematika yang diizinkan oleh evaluator aman ini.
-_BINARY_OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-}
-_UNARY_OPERATORS = {
-    ast.UAdd: operator.pos,
-    ast.USub: operator.neg,
-}
+def safe_eval_math(expression: str) -> float:
+    expr = expression.replace("%", "/100")
+    expr = expr.replace("÷", "/").replace("×", "*")
+    expr = expr.strip()
 
-
-def safe_calculate(expression: str) -> Number:
-    """Evaluasi ekspresi matematika sederhana tanpa mengekspos builtins Python."""
-    if not expression or len(expression) > MAX_EXPRESSION_LENGTH:
+    if not is_valid_expression(expr):
         raise ValueError("Ekspresi tidak valid")
 
-    tree = ast.parse(expression, mode="eval")
+    tree = ast.parse(expr, mode="eval")
 
-    def evaluate(node: ast.AST) -> Number:
-        if isinstance(node, ast.Expression):
-            return evaluate(node.body)
-
+    def evaluate(node: ast.AST) -> float:
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            if isinstance(node.value, bool) or not math.isfinite(float(node.value)):
-                raise ValueError("Angka tidak valid")
-            return node.value
+            value = float(node.value)
+            if not math.isfinite(value):
+                raise ValueError("Nilai tidak valid")
+            return value
 
-        if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
+        if isinstance(node, ast.BinOp):
             left = evaluate(node.left)
             right = evaluate(node.right)
-            if isinstance(node.op, ast.Div) and right == 0:
-                raise ZeroDivisionError
-            result = _BINARY_OPERATORS[type(node.op)](left, right)
-            if not math.isfinite(float(result)):
+            if isinstance(node.op, ast.Add):
+                result = left + right
+            elif isinstance(node.op, ast.Sub):
+                result = left - right
+            elif isinstance(node.op, ast.Mult):
+                result = left * right
+            elif isinstance(node.op, ast.Div):
+                if right == 0:
+                    raise ZeroDivisionError("Pembagian dengan nol")
+                result = left / right
+            elif isinstance(node.op, ast.Pow):
+                result = left ** right
+            else:
+                raise ValueError("Operator tidak didukung")
+
+            if not math.isfinite(result):
                 raise ValueError("Hasil terlalu besar")
             return result
 
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
-            result = _UNARY_OPERATORS[type(node.op)](evaluate(node.operand))
-            if not math.isfinite(float(result)):
+        if isinstance(node, ast.UnaryOp):
+            operand = evaluate(node.operand)
+            if isinstance(node.op, ast.UAdd):
+                result = +operand
+            elif isinstance(node.op, ast.USub):
+                result = -operand
+            else:
+                raise ValueError("Operator unary tidak didukung")
+            if not math.isfinite(result):
                 raise ValueError("Hasil terlalu besar")
             return result
+
+        if isinstance(node, ast.Call):
+            raise ValueError("Fungsi tidak didukung")
 
         raise ValueError("Ekspresi tidak valid")
 
-    return evaluate(tree)
+    return evaluate(tree.body)
 
 
-def format_result(result: Number) -> str:
-    if isinstance(result, float) and result.is_integer():
-        return str(int(result))
-    if isinstance(result, float):
-        return format(result, ".12g")
-    return str(result)
+def format_result(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return format(value, ".12g")
 
 
 def build_calculator_keyboard() -> InlineKeyboardMarkup:
@@ -110,7 +120,7 @@ def build_calculator_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("1", callback_data="1"),
             InlineKeyboardButton("2", callback_data="2"),
             InlineKeyboardButton("3", callback_data="3"),
-            InlineKeyboardButton("−", callback_data="-"),
+            InlineKeyboardButton("-", callback_data="-"),
         ],
         [
             InlineKeyboardButton("0", callback_data="0"),
@@ -122,57 +132,82 @@ def build_calculator_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def calculator_text(expression: str) -> str:
-    return f"🧮 <b>Kalkulator Telegram</b>\n\nEkspresi: <code>{expression}</code>"
+def build_message_text(expression: str) -> str:
+    safe_expression = expression if expression else "0"
+    return f"🧮 <b>{APP_NAME}</b>\n\nEkspresi: <code>{safe_expression}</code>"
+
+
+def extract_expression(text: str) -> str:
+    if "Ekspresi:" not in text:
+        return "0"
+    snippet = text.split("Ekspresi:", 1)[1]
+    cleaned = snippet.replace("<code>", "").replace("</code>", "").strip()
+    return cleaned or "0"
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is not None:
         await update.message.reply_text(
-            calculator_text("0"),
+            build_message_text("0"),
             parse_mode="HTML",
             reply_markup=build_calculator_keyboard(),
         )
 
 
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    help_text = (
+        "🧮 <b>Panduan Kalkulator</b>\n\n"
+        "• Gunakan tombol di keyboard untuk memasukkan angka dan operasi\n"
+        "• <b>C</b> = reset\n"
+        "• <b>DEL</b> = hapus satu karakter\n"
+        "• <b>=</b> = hitung hasil\n\n"
+        "Contoh: 12+7, (8*5)-2"
+    )
+    if update.message is not None:
+        await update.message.reply_text(help_text, parse_mode="HTML")
+
+
+async def button_click(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     if query is None or query.message is None:
         return
 
     await query.answer()
     current_text = query.message.text or ""
-    expression = "0"
+    current_expression = extract_expression(current_text)
 
-    if "Ekspresi:" in current_text:
-        expression = current_text.split("Ekspresi:", 1)[1]
-        expression = expression.replace("<code>", "").replace("</code>", "").strip()
-
-    if expression in {"Error", "Error (Bagi 0)", "Invalid"}:
-        expression = "0"
+    if current_expression in {"Error", "Invalid", "Error (Bagi 0)"}:
+        current_expression = "0"
 
     action = query.data or ""
 
     if action == "clear":
         new_expression = "0"
     elif action == "del":
-        new_expression = expression[:-1] if len(expression) > 1 else "0"
+        if len(current_expression) <= 1:
+            new_expression = "0"
+        else:
+            new_expression = current_expression[:-1]
     elif action == "=":
         try:
-            new_expression = format_result(safe_calculate(expression))
+            result = safe_eval_math(current_expression)
+            new_expression = format_result(result)
         except ZeroDivisionError:
             new_expression = "Error (Bagi 0)"
-        except (SyntaxError, ValueError, TypeError, OverflowError):
+        except Exception:
             new_expression = "Error"
     else:
-        if len(expression) >= MAX_EXPRESSION_LENGTH:
-            new_expression = expression
-        elif expression == "0" and (action.isdigit() or action == "."):
+        if current_expression == "0" and (action.isdigit() or action == "."):
+            new_expression = action
+        elif current_expression == "Error" or current_expression == "Invalid":
             new_expression = action
         else:
-            new_expression = expression + action
+            if len(current_expression) >= MAX_EXPRESSION_LENGTH:
+                new_expression = current_expression
+            else:
+                new_expression = current_expression + action
 
-    updated_text = calculator_text(new_expression)
+    updated_text = build_message_text(new_expression)
     if updated_text == current_text:
         return
 
@@ -182,24 +217,25 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode="HTML",
             reply_markup=build_calculator_keyboard(),
         )
-    except BadRequest as error:
-        # Misalnya pesan sudah diedit oleh klik ganda; tidak perlu mematikan bot.
-        logger.warning("Pesan tidak dapat diperbarui: %s", error)
+    except BadRequest as exc:
+        logger.warning("Gagal memperbarui pesan: %s", exc)
     except Exception:
-        logger.exception("Gagal memperbarui pesan kalkulator")
+        logger.exception("Error saat edit message calculator")
 
 
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError(
-            "BOT_TOKEN belum diatur. Jalankan: export BOT_TOKEN='token-dari-BotFather'"
+            "BOT_TOKEN belum diatur. Jalankan: export BOT_TOKEN='TOKEN_BOT_TELEGRAM_KAMU'"
         )
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler(["start", "kalkulator"], start_command))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("kalkulator", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_click))
 
-    logger.info("Bot kalkulator berjalan...")
+    logger.info("Bot kalkulator siap berjalan...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
