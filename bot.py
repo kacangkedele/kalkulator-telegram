@@ -12,7 +12,7 @@ from telegram.ext import ApplicationBuilder, CallbackContext, CallbackQueryHandl
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8503399027:AAGXsl13LHuQBaRzOVIJAA_QsDPieTZJl1Q")
 APP_NAME = "Kalkulator Telegram Interaktif"
 MAX_EXPRESSION_LENGTH = 80
 
