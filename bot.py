@@ -3,16 +3,23 @@ import logging
 import math
 import os
 import re
-from typing import Any
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
-from telegram.ext import ApplicationBuilder, CallbackContext, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackContext,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("8503399027:AAGXsl13LHuQBaRzOVIJAA_QsDPieTZJl1Q")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_NAME = "Kalkulator Telegram Interaktif"
 MAX_EXPRESSION_LENGTH = 80
 
@@ -26,7 +33,7 @@ logger = logging.getLogger(__name__)
 def is_valid_expression(text: str) -> bool:
     if not text or len(text) > MAX_EXPRESSION_LENGTH:
         return False
-    if re.search(r"[^0-9+\-*/().%\s]", text):
+    if re.search(r"[^0-9+\-*/().%\s^]", text):
         return False
     return True
 
@@ -34,6 +41,7 @@ def is_valid_expression(text: str) -> bool:
 def safe_eval_math(expression: str) -> float:
     expr = expression.replace("%", "/100")
     expr = expr.replace("÷", "/").replace("×", "*")
+    expr = expr.replace("^", "**")
     expr = expr.strip()
 
     if not is_valid_expression(expr):
@@ -141,7 +149,7 @@ def extract_expression(text: str) -> str:
     if "Ekspresi:" not in text:
         return "0"
     snippet = text.split("Ekspresi:", 1)[1]
-    cleaned = snippet.replace("<code>", "").replace("</code>", "").strip()
+    cleaned = re.sub(r"<.*?>", "", snippet).strip()
     return cleaned or "0"
 
 
@@ -161,10 +169,40 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• <b>C</b> = reset\n"
         "• <b>DEL</b> = hapus satu karakter\n"
         "• <b>=</b> = hitung hasil\n\n"
-        "Contoh: 12+7, (8*5)-2"
+        "Contoh: 12+7, (8*5)-2, 2^8"
     )
     if update.message is not None:
         await update.message.reply_text(help_text, parse_mode="HTML")
+
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    user_text = update.message.text.strip()
+
+    if user_text.startswith("/"):
+        return
+
+    if not is_valid_expression(user_text):
+        await update.message.reply_text(
+            "❌ Format tidak valid. Gunakan angka dan operator matematika seperti +, -, *, /, %, ^, ().",
+        )
+        return
+
+    try:
+        result = safe_eval_math(user_text)
+        formatted = format_result(result)
+        await update.message.reply_text(
+            f"✅ Hasil: <b>{formatted}</b>",
+            parse_mode="HTML",
+        )
+    except ZeroDivisionError:
+        await update.message.reply_text("❌ Error: Tidak bisa dibagi dengan nol (0).")
+    except Exception:
+        await update.message.reply_text(
+            "❌ Terjadi kesalahan dalam perhitungan. Periksa kembali ekspresi Anda."
+        )
 
 
 async def button_click(update: Update, context: CallbackContext) -> None:
@@ -226,13 +264,14 @@ async def button_click(update: Update, context: CallbackContext) -> None:
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError(
-            "BOT_TOKEN belum diatur. Jalankan: export BOT_TOKEN='TOKEN_BOT_TELEGRAM_KAMU'"
+            "BOT_TOKEN belum diatur. Buat file .env dengan isi: BOT_TOKEN=TOKEN_BOT_KAMU"
         )
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("kalkulator", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     application.add_handler(CallbackQueryHandler(button_click))
 
     logger.info("Bot kalkulator siap berjalan...")
